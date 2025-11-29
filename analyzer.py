@@ -221,4 +221,4 @@ if __name__ == "__main__":
         output_data['reason'] = "Nincs fájl megadva"
 
     # Visszaadjuk a régi szerkezetű JSON-t — biztosítva, hogy a PHP feldolgozód kezelni tudja
-    print(json.dumps(output_data, ensure_ascii=False))
+   print(json.dumps(output_data))
