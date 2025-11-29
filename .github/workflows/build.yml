@@ -20,7 +20,8 @@ jobs:
         
     - name: Build with PyInstaller
       run: |
-        pyinstaller --onefile analyzer.py
+        # Segít beágyazni a multiprocessing összes függőségét, beleértve a socket DLL-eket
+        pyinstaller --onefile --collect-all multiprocessing analyzer.py
         
     - name: Upload EXE
       uses: actions/upload-artifact@v4  # FRISSÍTVE
