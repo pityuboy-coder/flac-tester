@@ -20,7 +20,6 @@ jobs:
         
     - name: Build with PyInstaller
       run: |
-        # Segít beágyazni a multiprocessing összes függőségét, beleértve a socket DLL-eket
         pyinstaller --onefile --collect-all multiprocessing analyzer.py
         
     - name: Upload EXE
