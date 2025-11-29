@@ -4,31 +4,26 @@ on: [push]
 
 jobs:
   build:
-    # Ezen a szerveren fut a fordítás
     runs-on: windows-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4  # FRISSÍTVE
     
     - name: Set up Python
-      # Telepíti a Python 3.10-et a GitHub szerverére
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
         
     - name: Install dependencies
-      # Telepíti a numpy, librosa, mutagen, pyinstaller csomagokat
       run: |
         pip install -r requirements.txt
         
     - name: Build with PyInstaller
-      # Lefuttatja az EXE készítését
       run: |
         pyinstaller --onefile analyzer.py
         
     - name: Upload EXE
-      # Feltölti a kész EXE-t a letöltéshez
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4  # FRISSÍTVE
       with:
         name: FlacAnalyzerEXE
         path: dist/analyzer.exe
