@@ -5,15 +5,15 @@ import librosa
 import mutagen.flac
 import os
 
-# --- Alap kimeneti struktúra ---
+# Alap JSON struktúra
 output_data = {
     "status": "error",
     "filename": "",
     "is_original": False,
     "confidence": 0,
     "cutoff_frequency": 0,
-    "check_frequency_21k_db": 0.0, # Energia 21kHz-nél (dB)
-    "db_difference_19k_21k": 0.0, # Kontraszt (19kHz vs 21kHz)
+    "rolloff_frequency": 0,
+    "hf_slope": 0,
     "metadata": {},
     "reason": ""
 }
@@ -26,108 +26,105 @@ def analyze_audio(file_path):
             output_data['metadata'] = {
                 "artist": audio_meta.get("artist", ["Ismeretlen"])[0],
                 "title": audio_meta.get("title", ["Ismeretlen"])[0],
+                "album": audio_meta.get("album", ["Ismeretlen"])[0],
                 "sample_rate": audio_meta.info.sample_rate,
+                "bits_per_sample": audio_meta.info.bits_per_sample,
                 "bitrate": audio_meta.info.bitrate
             }
-        except Exception:
-            # Nem kritikus hiba, ha a metaadat sérült, de a fájl olvasható
-            pass
+        except Exception as meta_error:
+            output_data['metadata'] = {"error": str(meta_error)}
 
-        # --- 2. Betöltés és STFT elemzés ---
-        # Betöltjük a fájlt (offset 10mp, duration 30s – elkerülve a csendes intrót)
+        # --- 2. Audio betöltés ---
         y, sr = librosa.load(file_path, sr=None, offset=10.0, duration=30.0)
-        
-        # Ha rövid a fájl, betöltjük az egészet
+
         if len(y) == 0:
-             y, sr = librosa.load(file_path, sr=None, duration=30.0)
+            y, sr = librosa.load(file_path, sr=None, duration=30.0)
 
-        n_fft = 2048
-        stft = np.abs(librosa.stft(y, n_fft=n_fft))
-        
-        # Átkonvertálás dB-re (a leghangosabb pont legyen a 0 dB)
-        db_data = librosa.amplitude_to_db(stft, ref=np.max)
-        
-        # FONTOS VÁLTOZÁS: 95%-os percentilis a dinamikus csúcsokhoz
-        # Ez a valódi zenei csúcsokat (pl. cintányérok) fogja mérni, nem az átlagos halkságot.
-        peak_power = np.percentile(db_data, 95, axis=1)
-        freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+        # STFT
+        stft_full = np.abs(librosa.stft(y, n_fft=4096))
+        power_spectrum = np.mean(stft_full, axis=1)
 
-        # --- 3. Vágás keresése (Kritikus pont) ---
-        
-        cutoff_freq = 0
-        # Küszöb a csúcsérték kereséséhez. -85 dB elég érzékeny, de elkerüli a legalacsonyabb zajokat.
-        noise_floor_db = -85.0 
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=4096)
 
-        # Visszafelé pásztázunk a legmagasabb frekvenciától
-        for i in range(len(freqs)-1, 0, -1):
-            if peak_power[i] > noise_floor_db:
-                cutoff_freq = freqs[i]
-                break
-        
-        output_data['cutoff_frequency'] = int(cutoff_freq)
+        # --- 3. Frekvenciasávok vizsgálata ---
+        bands = {
+            "14k": (14000, 16000),
+            "16k": (16000, 18000),
+            "18k": (18000, 20000),
+            "20k": (20000, 22050)
+        }
 
-        # --- 4. Kontraszt Elemzés (Meredekség ellenőrzése) ---
-        
-        # 1. Energia 19kHz-nél (Referencia: ahol még erős a zene)
-        idx_19k = np.argmin(np.abs(freqs - 19000))
-        power_at_19k = peak_power[idx_19k]
-        
-        # 2. Energia 21kHz-nél (Ellenőrző pont: ahol a fake FLAC-nek "halottnak" kell lennie)
-        idx_21k = np.argmin(np.abs(freqs - 21000))
-        power_at_21k = peak_power[idx_21k]
-        output_data['check_frequency_21k_db'] = float(round(power_at_21k, 2))
-        
-        # Kiszámoljuk a dB különbséget. Nagy különbség = Meredek vágás (MP3).
-        db_difference = power_at_19k - power_at_21k
-        output_data['db_difference_19k_21k'] = float(round(db_difference, 2))
-        
-        # --- 5. Eredmény kiértékelése (Kontraszt alapú logika) ---
-        
-        # A kontraszt küszöb (20 dB): ha 19k és 21k között 20 dB-nél meredekebb a zuhanás, az mesterséges.
-        CONTRAST_THRESHOLD = 20.0
-        
-        # 1. Eset: Egyértelműen teljes spektrum (>20.5 kHz)
-        if cutoff_freq >= 20500:
-            
-            if db_difference < CONTRAST_THRESHOLD:
-                # Magas cutoff ÉS lassú esés = Tiszta eredeti
-                output_data['is_original'] = True
-                output_data['confidence'] = 99
-                output_data['reason'] = f"Teljes spektrum ({int(cutoff_freq)} Hz) és természetes esés (<{CONTRAST_THRESHOLD} dB kontraszt)."
+        band_energy = {}
+
+        for name, (f_low, f_high) in bands.items():
+            idx = np.where((freqs >= f_low) & (freqs <= f_high))[0]
+            if len(idx) > 0:
+                band_energy[name] = float(np.mean(power_spectrum[idx]))
             else:
-                # Magas cutoff, de MEREKEN vágás (ritka, de lehet zajosított MP3)
-                output_data['is_original'] = False
-                output_data['confidence'] = 75
-                output_data['reason'] = f"Gyanús: Magas cutoff, de nagyon meredek vágás ({round(db_difference, 1)} dB kontraszt). Lehet transzkódolt."
-            
-            output_data['status'] = "success"
+                band_energy[name] = 0.0
 
-        # 2. Eset: MP3 vágási zóna (19 kHz - 20.5 kHz között)
-        elif 19000 <= cutoff_freq < 20500:
-            
-            # DÖNTŐ PONT: Ha a kontraszt túl nagy, akkor meredek a vágás, és hamis.
-            if db_difference > CONTRAST_THRESHOLD: 
-                output_data['is_original'] = False
-                output_data['confidence'] = 95
-                output_data['reason'] = f"Meredek spektrum esés ({round(db_difference, 1)} dB kontraszt). MP3/Transzkód (320kbps)."
-            else:
-                # Lassú esés (természetes) esetén elfogadjuk, hogy csak halk a zene
-                output_data['is_original'] = True
-                output_data['confidence'] = 60
-                output_data['reason'] = f"Határeset: Lassú esés (<{CONTRAST_THRESHOLD} dB kontraszt), valószínűleg eredeti, halk magas hangokkal."
-            
-            output_data['status'] = "success"
-
-        # 3. Eset: Egyértelmű vágás 19 kHz alatt
+        # --- 4. Cutoff frekvencia becslése ---
+        if band_energy["18k"] < band_energy["16k"] * 0.1:
+            final_cutoff = 18000
+        elif band_energy["20k"] < band_energy["18k"] * 0.2:
+            final_cutoff = 20000
         else:
+            final_cutoff = 22050
+
+        output_data["cutoff_frequency"] = final_cutoff
+
+        # --- 5. Brickwall meredekség ---
+        slope = band_energy["18k"] - band_energy["20k"]
+        output_data["hf_slope"] = float(slope)
+
+        # --- 6. Spectral rolloff (statisztikai) ---
+        roll = librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.99)
+        roll_mean = float(np.mean(roll))
+        output_data["rolloff_frequency"] = int(roll_mean)
+
+        # --- 7. Eredetiség kiértékelése ---
+        # Brickwall MP3/AAC detektálás
+        if slope < -0.7:
             output_data['is_original'] = False
             output_data['confidence'] = 99
-            output_data['reason'] = f"Alacsony vágás ({int(cutoff_freq)} Hz). Kisebb bitrátájú MP3/Transzkód."
+            output_data['reason'] = f"Erős brickwall (slope={slope:.2f}), cutoff: {final_cutoff} Hz → MP3 transzkód."
             output_data['status'] = "success"
+            return
+
+        # 16–19 kHz körüli vágás → nagy valószínűségű MP3
+        if final_cutoff < 19000:
+            output_data['is_original'] = False
+            output_data['confidence'] = 95
+            output_data['reason'] = f"Magas frekvenciás energiahiány, cutoff {final_cutoff} Hz → MP3/veszteséges forrás."
+            output_data['status'] = "success"
+            return
+
+        # 19–20 kHz → gyanús / AAC
+        if final_cutoff < 21000:
+            output_data['is_original'] = False
+            output_data['confidence'] = 90
+            output_data['reason'] = f"20 kHz alatti vágás ({final_cutoff} Hz). Valószínűleg AAC/MP3 transzkód."
+            output_data['status'] = "success"
+            return
+
+        # Ha a 20–22 kHz tartományban is van jel → eredeti FLAC
+        if final_cutoff > 21000 and slope > -0.3:
+            output_data['is_original'] = True
+            output_data['confidence'] = 98
+            output_data['reason'] = "Teljes spektrum (20–22 kHz), nincs brickwall → Valós FLAC."
+            output_data['status'] = "success"
+            return
+
+        # Egyéb ismeretlen eset
+        output_data['is_original'] = False
+        output_data['confidence'] = 80
+        output_data['reason'] = "Gyanús spektrum, nem tipikus FLAC mintázat."
+        output_data['status'] = "success"
 
     except Exception as e:
-        output_data['reason'] = str(e)
-        output_data['status'] = "error"
+        output_data["reason"] = str(e)
+        output_data["status"] = "error"
+
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
@@ -139,6 +136,5 @@ if __name__ == "__main__":
             output_data['reason'] = "Fájl nem található"
     else:
         output_data['reason'] = "Nincs fájl megadva"
-    
-    # A végeredmény kiírása JSON formátumban
-    print(json.dumps(output_data, indent=4))
+
+    print(json.dumps(output_data))
