@@ -100,12 +100,12 @@ def analyze_audio(file_path):
         rel_18_20 = rel(band_vals["18_20k"])
         rel_20_22 = rel(band_vals["20_22k"])
 
-        # --- FEJLETT HAMISÍTÁS FELISMERÉS (második kódból átemelve) ---
+        # --- FEJLETT HAMISÍTÁS FELISMERÉS ---
         score_fake = 0
         score_real = 0
         reasons = []
 
-        # 16–18 kHz erős esés → MP3 transzkód tipikus
+        # 16–18 kHz erős esés → MP3 transzkód
         if rel_16_18 is not None and rel_16_18 <= -12:
             score_fake += 30
             reasons.append("Erős esés 16–18 kHz között.")
@@ -121,14 +121,14 @@ def analyze_audio(file_path):
                 score_fake += 25
                 reasons.append("Zajkiterjesztés 20–22 kHz között.")
 
-        # Magas tartomány jó → eredeti irány
+        # Magas tartomány jó → eredeti
         high_ok = 0
         for r in (rel_16_18, rel_18_20, rel_20_22):
             if r is not None and r > -6:
                 high_ok += 1
         if high_ok >= 2:
             score_real += 60
-            reasons.append("Magas frekvenciák megfelelő energiával rendelkeznek.")
+            reasons.append("Magas frekvenciák megfelelő energiával.")
 
         # --- VALÓDI DÖNTÉS ---
         total = score_fake + score_real
@@ -140,12 +140,12 @@ def analyze_audio(file_path):
         is_original = fake_prob < 0.5
         confidence = int(50 + abs(fake_prob - 0.5) * 100)
 
-        # --- EXTRA SZIGORÚ SZABÁLYOK ---
+        # EXTRA SZIGOR
         if band_vals["20_22k"] is not None and rel_16_18 is not None:
             if (band_vals["20_22k"] > (noise_floor + 3)) and (rel_16_18 <= -12):
                 is_original = False
                 confidence = max(confidence, 95)
-                reasons.append("20–22 kHz zaj + 16–18 kHz esés → biztos hamis.")
+                reasons.append("20–22 kHz zaj + 16–18 kHz esés → hamis.")
 
         # --- CUTOFF MEGHATÁROZÁSA ---
         thresh = noise_floor + 6
@@ -155,7 +155,7 @@ def analyze_audio(file_path):
         else:
             cutoff_freq = 0
 
-        # --- KIMENET (EREDETI FORMÁTUMBAN!) ---
+        # --- KIMENET (EREDETI STRUKTÚRA!) ---
         output_data["cutoff_frequency"] = cutoff_freq
         output_data["is_original"] = is_original
         output_data["confidence"] = int(confidence)
@@ -179,4 +179,4 @@ if __name__ == "__main__":
     else:
         output_data["reason"] = "Nincs fájl megadva"
 
-    print(json.dumps(output_data, ensure_ascii=False))
+    print(json.dumps(output_data))
