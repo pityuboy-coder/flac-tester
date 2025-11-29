@@ -37,7 +37,7 @@ def analyze_audio(file_path):
 
         # Vágás keresése
         cutoff_freq = 0
-        noise_floor_db = -72
+        noise_floor_db = -76
         for i in range(len(freqs)-1, 0, -1):
             if avg_power[i] > noise_floor_db:
                 cutoff_freq = freqs[i]
