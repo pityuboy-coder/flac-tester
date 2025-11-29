@@ -55,7 +55,7 @@ def analyze_audio(file_path):
         cutoff_freq_scan = 0
         # -60 dB-re emeltem a küszöböt. 
         # A transzkódolt fájlokban gyakran van -70/-80dB zaj a magasban, ezt most figyelmen kívül hagyjuk.
-        threshold_db = -60.0 
+        threshold_db = -80.0 
         
         for i in range(len(freqs)-1, 0, -1):
             if avg_power[i] > threshold_db:
