@@ -1,7 +1,6 @@
 numpy
 librosa
+scipy
 soundfile
-scipy.signal
-welch
 mutagen
 pyinstaller
