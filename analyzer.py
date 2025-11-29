@@ -7,7 +7,6 @@ from scipy.signal import welch
 import mutagen.flac
 import os
 
-
 def downsample_for_plot(x_data, y_data, target_points=250):
     if len(x_data) <= target_points:
         return x_data.tolist(), y_data.tolist()
