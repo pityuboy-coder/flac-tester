@@ -5,14 +5,12 @@ import librosa
 import mutagen.flac
 import os
 
-# Alap kimenet
 output_data = {
     "status": "error",
     "filename": "",
     "is_original": False,
     "confidence": 0,
     "cutoff_frequency": 0,
-    "rolloff_frequency": 0, # Új adatmező
     "metadata": {},
     "reason": ""
 }
@@ -25,93 +23,86 @@ def analyze_audio(file_path):
             output_data['metadata'] = {
                 "artist": audio_meta.get("artist", ["Ismeretlen"])[0],
                 "title": audio_meta.get("title", ["Ismeretlen"])[0],
-                "album": audio_meta.get("album", ["Ismeretlen"])[0],
                 "sample_rate": audio_meta.info.sample_rate,
-                "bits_per_sample": audio_meta.info.bits_per_sample,
                 "bitrate": audio_meta.info.bitrate
             }
-        except Exception as meta_error:
-            # Ha a metaadat sérült, ne álljon meg a program, csak logolja
-            output_data['metadata'] = {"error": str(meta_error)}
+        except Exception:
+            output_data['metadata'] = {"error": "Metaadat hiba"}
 
-        # --- 2. Betöltés és Elemzés ---
-        # 30 helyett 10-40 mp közötti részt nézünk, hogy elkerüljük a csendes intrót
-        y, sr = librosa.load(file_path, sr=None, offset=10.0, duration=30.0)
-        
-        # Ha a fájl rövidebb mint 10mp, töltsük be az elejétől
+        # --- 2. Elemzés (Peak módszerrel) ---
+        # Betöltünk 30 másodpercet, de kihagyjuk az elejét (offset=5), hogy a csendet kerüljük
+        try:
+            y, sr = librosa.load(file_path, sr=None, offset=5.0, duration=30.0)
+        except:
+            # Ha nagyon rövid a fájl, offset nélkül töltjük
+            y, sr = librosa.load(file_path, sr=None, duration=30.0)
+
         if len(y) == 0:
-             y, sr = librosa.load(file_path, sr=None, duration=30.0)
+            raise ValueError("Üres vagy hibás audiofájl.")
 
+        # STFT számítás
         stft = np.abs(librosa.stft(y))
         
-        # Átlagos dB számítás
-        # A ref=np.max biztosítja, hogy a leghangosabb pont legyen a 0 dB
-        avg_power = np.mean(librosa.amplitude_to_db(stft, ref=np.max), axis=1)
+        # Átlagolás HELYETT: Percentilis (Csúcstartás)
+        # Ez a kulcs: nem az átlagot nézzük, hanem a leghangosabb pontokat az adott frekvencián.
+        # A 95-ös percentilis kiszűri az egyszeri hibákat, de megtartja a cintányérokat.
+        db_values = librosa.amplitude_to_db(stft, ref=np.max)
+        peak_power = np.percentile(db_values, 95, axis=1) # mean helyett 95%
+        
         freqs = librosa.fft_frequencies(sr=sr)
 
-        # --- 3. Kétlépcsős Vágás Keresés ---
+        # --- 3. Vágási pont keresése (Intelligensebb logika) ---
+        
+        # Küszöbérték: -80dB (Mivel most a "csúcsokat" nézzük, lemehetünk mélyre a zajszintig)
+        noise_floor_db = -80.0
+        
+        # Megkeressük az összes olyan frekvenciát, ami hangosabb a zajnál
+        valid_indices = np.where(peak_power > noise_floor_db)[0]
+        
+        if len(valid_indices) > 0:
+            # A legmagasabb frekvencia, ahol még volt jel
+            last_valid_idx = valid_indices[-1]
+            cutoff_freq = freqs[last_valid_idx]
+        else:
+            cutoff_freq = 0
 
-        # "A" Módszer: Hagyományos pásztázás (Szigorúbb küszöbbel!)
-        cutoff_freq_scan = 0
-        # -60 dB-re emeltem a küszöböt. 
-        # A transzkódolt fájlokban gyakran van -70/-80dB zaj a magasban, ezt most figyelmen kívül hagyjuk.
-        threshold_db = -60.0 
-        
-        for i in range(len(freqs)-1, 0, -1):
-            if avg_power[i] > threshold_db:
-                cutoff_freq_scan = freqs[i]
-                break
+        output_data['cutoff_frequency'] = int(cutoff_freq)
 
-        # "B" Módszer: Spectral Rolloff (Statisztikai megközelítés)
-        # Megkeresi azt a frekvenciát, amely alatt az energia 99%-a van.
-        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.99)
-        rolloff_freq_mean = np.mean(rolloff)
+        # --- 4. Kiértékelés (Enyhébb határok) ---
+        
+        # CD minőség (44.1kHz) esetén a Nyquist frekvencia 22050 Hz.
+        # Egy MP3 (LAME 320kbps) általában 20000-20500 Hz-nél vág meredeken.
+        # Egy FLAC általában elmegy 21000-22000 Hz-ig, de fokozatosan halkul.
 
-        # A végleges cutoff a két módszer átlaga vagy a szigorúbb (kisebb) érték
-        # A biztonság kedvéért a pásztázott értéket vesszük alapnak, de logoljuk a másikat is
-        final_cutoff = int(cutoff_freq_scan)
-        
-        output_data['cutoff_frequency'] = final_cutoff
-        output_data['rolloff_frequency'] = int(rolloff_freq_mean)
-
-        # --- 4. Eredmény kiértékelése (Kalibrálva) ---
-        
-        nyquist = sr / 2
-        
-        # Ellenőrizzük a mintavételezést is.
-        # Ha 44.1kHz-es a fájl, a max frekvencia 22050Hz.
-        
-        if final_cutoff > 20000:
-            # CD minőség (44.1kHz) esetén a 20kHz feletti jel már jónak számít
+        if cutoff_freq >= 21000:
             output_data['is_original'] = True
             output_data['confidence'] = 98
-            output_data['reason'] = f"Teljes spektrum ({final_cutoff} Hz). Valós veszteségmentes."
+            output_data['reason'] = f"Teljes spektrum ({int(cutoff_freq)} Hz). Eredeti."
             output_data['status'] = "success"
             
-        elif final_cutoff > 18500:
-            # MP3 320kbps vagy AAC általában itt vág (19.5kHz - 20.5kHz körül)
-            # De néha régi felvételeknél az eredeti is lehet ilyen.
-            output_data['is_original'] = False # Inkább legyünk szigorúak
-            output_data['confidence'] = 85
-            output_data['reason'] = f"Gyanús vágás 20kHz alatt ({final_cutoff} Hz). Valószínűleg MP3 320kbps vagy régi master."
+        elif cutoff_freq >= 20000:
+            # Ez a 'szürke zóna'. Sok eredeti master itt véget ér, de a legjobb MP3-ak is.
+            # Mivel a felhasználó "in dubio pro reo" (kétség esetén eredeti) elvet szeretne:
+            output_data['is_original'] = True 
+            output_data['confidence'] = 80
+            output_data['reason'] = f"Magas frekvencia ({int(cutoff_freq)} Hz). Valószínűleg eredeti, vagy kiváló transcode."
             output_data['status'] = "success"
             
-        elif final_cutoff > 15000:
+        elif cutoff_freq > 16000:
+            # 16k - 19.5k között biztosan veszteséges (MP3 128-192-320kbps vegyesen)
             output_data['is_original'] = False
-            output_data['confidence'] = 99
-            output_data['reason'] = f"Erős vágás ({final_cutoff} Hz). MP3 128-192kbps."
+            output_data['confidence'] = 95
+            output_data['reason'] = f"Vágott spektrum ({int(cutoff_freq)} Hz). MP3 forrás."
             output_data['status'] = "success"
-            
         else:
             output_data['is_original'] = False
-            output_data['confidence'] = 100
-            output_data['reason'] = f"Nagyon alacsony sávszélesség ({final_cutoff} Hz)."
+            output_data['confidence'] = 99
+            output_data['reason'] = f"Alacsony minőség ({int(cutoff_freq)} Hz)."
             output_data['status'] = "success"
 
     except Exception as e:
         output_data['reason'] = str(e)
-        # Hiba esetén írjuk ki a konzolra is, ha debugolni kell
-        # print(f"Hiba történt: {e}", file=sys.stderr)
+        output_data['status'] = "error"
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
